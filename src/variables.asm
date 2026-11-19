@@ -53,6 +53,8 @@ tablero_j2:         .space 256      # Matriz lógica de Jugador 2 o CPU (16x16 b
     # 3. PALETA DE COLORES (Formato ARGB / 0x00RRGGBB de 32 bits)
     # ==========================================================================
     .globl COLOR_AGUA
+    .globl COLOR_AGUA_ATAQUE
+    .globl COLOR_AGUA_DEFENSA
     .globl COLOR_BARCO
     .globl COLOR_IMPACTO
     .globl COLOR_FALLO
@@ -65,7 +67,9 @@ tablero_j2:         .space 256      # Matriz lógica de Jugador 2 o CPU (16x16 b
     .globl COLOR_MENU_PVCPU
 
     .align 2
-COLOR_AGUA:         .word 0x001A4B  # Azul Marino Profundo (Océano)
+COLOR_AGUA:         .word 0x001438  # Compatibilidad general
+COLOR_AGUA_ATAQUE:  .word 0x001438  # Azul marino oscuro (Tablero Superior: Filas 0..15)
+COLOR_AGUA_DEFENSA: .word 0x003B73  # Azul océano más claro (Tablero Inferior: Filas 16..31)
 COLOR_BARCO:        .word 0x757575  # Gris Acorazado
 COLOR_IMPACTO:      .word 0xD50000  # Rojo Fuego (Impacto)
 COLOR_FALLO:        .word 0xEEEEEE  # Blanco Espuma (Agua atacada)
@@ -150,6 +154,22 @@ total_vidas_j1:     .word 14
 total_vidas_j2:     .word 14
 
     # ==========================================================================
+    # 6.1 COLA DE OBJETIVOS DE LA IA CPU (MODO HUNT & TARGET)
+    # ==========================================================================
+    .globl cola_ia_x
+    .globl cola_ia_y
+    .globl cola_ia_head
+    .globl cola_ia_tail
+    .globl cola_ia_count
+
+    .align 2
+cola_ia_x:          .space 64        # Buffer circular de objetivos X (hasta 64)
+cola_ia_y:          .space 64        # Buffer circular de objetivos Y (hasta 64)
+cola_ia_head:       .word 0          # Índice de extracción (desencolar)
+cola_ia_tail:       .word 0          # Índice de inserción (encolar)
+cola_ia_count:      .word 0          # Cantidad de objetivos pendientes
+
+    # ==========================================================================
     # 7. MENSAJES Y CADENAS DE CONSOLA RUN I/O (Syscall 4)
     # ==========================================================================
     .globl msg_banner
@@ -170,6 +190,29 @@ total_vidas_j2:     .word 14
     .globl msg_transicion_pvp
     .globl msg_rotacion_h
     .globl msg_rotacion_v
+    .globl msg_ya_atacada
+    .globl msg_impacto
+    .globl msg_fallo
+    .globl msg_fallo_num
+    .globl msg_de_tres
+    .globl msg_cambio_turno_pvp
+    .globl msg_hundido_banner
+    .globl msg_comodin_activado
+    .globl msg_cpu_turno_banner
+    .globl msg_cpu_disparo_a
+    .globl msg_cpu_coma
+    .globl msg_cpu_cierra
+    .globl msg_cpu_acierto
+    .globl msg_cpu_agua
+    .globl msg_cpu_hundio_barco
+    .globl msg_victoria_j1
+    .globl msg_victoria_j2
+    .globl msg_victoria_cpu
+    .globl msg_game_over
+    .globl msg_puntaje_j1_txt
+    .globl msg_puntaje_j2_txt
+    .globl msg_puntos_sufijo
+    .globl msg_repite_disparo
     .globl str_barco_1
     .globl str_barco_2
     .globl str_barco_3
@@ -237,6 +280,75 @@ msg_rotacion_h:
 
 msg_rotacion_v:
     .asciiz "Orientacion: [VERTICAL]\n"
+
+msg_ya_atacada:
+    .asciiz "[AVISO] Casilla ya atacada previamente. Elige otra coordenada.\n"
+
+msg_impacto:
+    .asciiz "¡¡¡IMPACTO CONFIRMADO!!! (+1 punto)\n"
+
+msg_fallo:
+    .asciiz "Agua... Disparo fallido.\n"
+
+msg_fallo_num:
+    .asciiz "Fallo consecutivo: "
+
+msg_de_tres:
+    .asciiz " de 3.\n"
+
+msg_cambio_turno_pvp:
+    .asciiz "\n========================================================\n3 fallos consecutivos alcanzados. ¡CAMBIO DE TURNO!\n========================================================\n"
+
+msg_hundido_banner:
+    .asciiz "\n********************************************************\n*** ¡¡¡BARCO HUNDIDO!!! (+5 puntos extra)             ***\n********************************************************\n"
+
+msg_comodin_activado:
+    .asciiz "\n>>> ¡¡¡COMODIN MISTERIOSO ACTIVADO!!! ATAQUE EN AREA <<<\n"
+
+msg_cpu_turno_banner:
+    .asciiz "\n>>> TURNO DE LA COMPUTADORA (CPU) <<<\n"
+
+msg_cpu_disparo_a:
+    .asciiz "[CPU] Disparo a casilla ("
+
+msg_cpu_coma:
+    .asciiz ", "
+
+msg_cpu_cierra:
+    .asciiz "): "
+
+msg_cpu_acierto:
+    .asciiz "¡IMPACTO EN TU FLOTA!\n"
+
+msg_cpu_agua:
+    .asciiz "Agua.\n"
+
+msg_cpu_hundio_barco:
+    .asciiz "\n[CPU] ¡¡¡La computadora ha hundido uno de tus barcos!!!\n"
+
+msg_repite_disparo:
+    .asciiz "¡Impacto certero! Repites turno de disparo.\n"
+
+msg_victoria_j1:
+    .asciiz "\n========================================================\n           ¡¡¡VICTORIA PARA EL JUGADOR 1!!!             \n========================================================\n"
+
+msg_victoria_j2:
+    .asciiz "\n========================================================\n           ¡¡¡VICTORIA PARA EL JUGADOR 2!!!             \n========================================================\n"
+
+msg_victoria_cpu:
+    .asciiz "\n========================================================\n              ¡¡¡LA CPU HA GANADO!!!                    \n========================================================\n"
+
+msg_game_over:
+    .asciiz "                      GAME OVER                         \n========================================================\n"
+
+msg_puntaje_j1_txt:
+    .asciiz "PUNTUACION FINAL:\n  Jugador 1: "
+
+msg_puntaje_j2_txt:
+    .asciiz " puntos\n  Jugador 2 / CPU: "
+
+msg_puntos_sufijo:
+    .asciiz " puntos\n========================================================\n"
 
 
 # ==============================================================================

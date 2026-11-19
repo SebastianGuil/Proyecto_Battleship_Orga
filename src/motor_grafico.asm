@@ -1,27 +1,29 @@
 # ==============================================================================
 # PROYECTO: BATTLESHIP (BATALLA NAVAL) - ARQUITECTURA MIPS R2000
 # SIMULADOR: MARS 4.5
-# ARCHIVO: motor_grafico.asm (Controlador VRAM y Renderizado de Tableros)
+# ARCHIVO: motor_grafico.asm (Controlador VRAM, Tonos Océano y Audio MIDI)
 # ==============================================================================
 #
 # DESCRIPCIÓN TÉCNICA:
 # Este módulo abstrae el acceso al Bitmap Display y garantiza que la VRAM refleje
 # fielmente el estado de las matrices lógicas en memoria (.data).
 #
-# GARANTÍAS DE ROBUSTEZ:
-# 1. Registros protegidos en bucles: En renderizado y borrado de previews se usan
-#    exclusivamente registros $s0-$s7 (guardados/restaurados en $sp).
-# 2. Toda subrutina anidada preserva $ra en el stack ($sp).
-# 3. Cero bucles infinitos en bordes: Si una coordenada excede el rango de pantalla,
-#    el flujo salta directamente a la etiqueta de incremento del contador, nunca
-#    al inicio del bucle.
-# 4. dibujar_pixel descarta silenciosamente cualquier coordenada fuera de rango.
+# CARACTERÍSTICAS DE LA FASE 4:
+# 1. Distinción cromática de tableros sin pérdida de filas:
+#    - COLOR_AGUA_ATAQUE  (Filas  0..15): Azul marino oscuro (0x001438).
+#    - COLOR_AGUA_DEFENSA (Filas 16..31): Azul océano más claro (0x003B73).
+#    Permite identificar visualmente la frontera entre zonas de combate al instante.
+# 2. Efectos sonoros asíncronos mediante syscall 31 (MIDI Generator):
+#    Emite tonos para impacto, fallo, hundimiento y victoria sin bloquear la CPU.
+# 3. Blindaje de registros en bucles: Se usan registros $s0-$s7 protegidos en stack.
+# 4. Descarte de coordenadas inválidas para prevenir corrupción de VRAM.
 # ==============================================================================
 
 .text
 .globl dibujar_pixel
 .globl fill_rect
 .globl limpiar_pantalla_color
+.globl limpiar_pantalla_tableros
 .globl obtener_color_celda
 .globl restaurar_celda_cursor
 .globl borrar_cursor
@@ -32,6 +34,10 @@
 .globl renderizar_preview_setup
 .globl borrar_preview_setup
 .globl validar_posicion_barco
+.globl sonido_disparo_fallo
+.globl sonido_impacto
+.globl sonido_hundido
+.globl sonido_victoria
 
 # ==============================================================================
 # SUBRUTINA: dibujar_pixel
@@ -42,7 +48,7 @@
 #   $a0 = Coordenada X (Columna: 0 a 15)
 #   $a1 = Coordenada Y (Fila: 0 a 31)
 #   $a2 = Color hexadecimal (0x00RRGGBB)
-# Comportamiento: Si X o Y están fuera de rango, retorna inmediatamente (no-op).
+# Comportamiento: Si X o Y están fuera de rango, descarta y retorna (no-op).
 # ==============================================================================
 dibujar_pixel:
     # 1. Validación estricta de límites de VRAM (16 cols x 32 filas)
@@ -108,6 +114,33 @@ limpiar_pantalla_color:
     jr   $ra
 
 # ==============================================================================
+# SUBRUTINA: limpiar_pantalla_tableros
+# ------------------------------------------------------------------------------
+# Propósito: Rellena la mitad superior con COLOR_AGUA_ATAQUE (0x001438) y la
+#            mitad inferior con COLOR_AGUA_DEFENSA (0x003B73).
+# ==============================================================================
+limpiar_pantalla_tableros:
+    subu $sp, $sp, 4
+    sw   $ra, 0($sp)
+
+    # 1. Mitad Superior (Ataque: 256 píxeles)
+    la   $a0, vram_buffer
+    li   $a1, 256
+    lw   $a2, COLOR_AGUA_ATAQUE
+    jal  fill_rect
+
+    # 2. Mitad Inferior (Defensa: 256 píxeles a partir de offset 1024)
+    la   $a0, vram_buffer
+    addi $a0, $a0, 1024
+    li   $a1, 256
+    lw   $a2, COLOR_AGUA_DEFENSA
+    jal  fill_rect
+
+    lw   $ra, 0($sp)
+    addu $sp, $sp, 4
+    jr   $ra
+
+# ==============================================================================
 # SUBRUTINA: obtener_color_celda
 # ------------------------------------------------------------------------------
 # Propósito: Consulta las matrices lógicas del juego en memoria (.data) y determina
@@ -120,7 +153,7 @@ limpiar_pantalla_color:
 #   $v0 = Código de color ARGB correspondiente
 # ==============================================================================
 obtener_color_celda:
-    # 0. Validación de límites: si está fuera de rango, retornar COLOR_AGUA
+    # 0. Validación perimetral
     bltz $a0, occ_fuera_rango
     bgt  $a0, 15, occ_fuera_rango
     bltz $a1, occ_fuera_rango
@@ -143,13 +176,13 @@ occ_atq_j1:
 occ_atq_calc:
     sll  $t2, $a1, 4            # Y * 16
     add  $t2, $t2, $a0          # (Y * 16) + X
-    add  $t1, $t1, $t2          # Dirección del byte en matriz lógica
-    lb   $t3, 0($t1)            # $t3 = Estado lógico de la casilla
+    add  $t1, $t1, $t2          # Dirección en matriz lógica
+    lb   $t3, 0($t1)            # $t3 = Estado lógico
 
-    beq  $t3, 6, occ_col_impacto # 6 = Impacto confirmado -> Rojo
-    beq  $t3, 5, occ_col_fallo   # 5 = Disparo al agua -> Blanco
-    # Casillas 0 (agua) o 1..4 (barco enemigo intacto) se muestran como agua azul
-    lw   $v0, COLOR_AGUA
+    beq  $t3, 6, occ_col_impacto # 6 = Impacto -> Rojo
+    beq  $t3, 5, occ_col_fallo   # 5 = Fallo -> Blanco
+    # Casillas 0 (agua) o 1..4 (barcos rivales ocultos) usan agua de Ataque
+    lw   $v0, COLOR_AGUA_ATAQUE
     jr   $ra
 
     # --------------------------------------------------------------------------
@@ -178,9 +211,9 @@ occ_def_calc:
     add  $t1, $t1, $t2
     lb   $t3, 0($t1)
 
-    beq  $t3, 6, occ_col_impacto # 6 = Impacto en barco propio -> Rojo
-    beq  $t3, 5, occ_col_fallo   # 5 = Fallo recibido en agua -> Blanco
-    beqz $t3, occ_col_agua      # 0 = Agua virgen -> Azul
+    beq  $t3, 6, occ_col_impacto # 6 = Impacto recibido -> Rojo
+    beq  $t3, 5, occ_col_fallo   # 5 = Fallo rival recibido -> Blanco
+    beqz $t3, occ_col_agua_def   # 0 = Agua propia -> Azul Defensa
     # 1..4 = Barco propio a flote -> Gris
     lw   $v0, COLOR_BARCO
     jr   $ra
@@ -193,12 +226,13 @@ occ_col_fallo:
     lw   $v0, COLOR_FALLO
     jr   $ra
 
-occ_col_agua:
-    lw   $v0, COLOR_AGUA
+occ_col_agua_def:
+    lw   $v0, COLOR_AGUA_DEFENSA
     jr   $ra
 
 occ_fuera_rango:
-    lw   $v0, COLOR_AGUA
+    bge  $a1, 16, occ_col_agua_def
+    lw   $v0, COLOR_AGUA_ATAQUE
     jr   $ra
 
 # ==============================================================================
@@ -266,15 +300,6 @@ dc_fin:
 # ------------------------------------------------------------------------------
 # Propósito: Dibuja la silueta del barco en fase de colocación.
 #            Usa ÚNICAMENTE registros $s0-$s7 para proteger contadores y límites.
-# Registros usados:
-#   $s0 = cursor_x
-#   $s1 = cursor_y
-#   $s2 = tamaño del barco
-#   $s3 = orientación (0=H, 1=V)
-#   $s4 = contador de casilla
-#   $s5 = coordenada X de la celda
-#   $s6 = coordenada Y de la celda
-#   $s7 = color de preview (Verde OK / Rojo ERR)
 # ==============================================================================
 renderizar_preview_setup:
     subu $sp, $sp, 36
@@ -325,7 +350,7 @@ rps_calc_h:
     move $s6, $s1
 
 rps_dibujar_celda:
-    # CERO bucles infinitos: si cae fuera de límites, salta al incremento de contador
+    # Validación perimetral: si cae fuera, avanzar contador obligatoriamente
     bltz $s5, rps_siguiente_celda
     bgt  $s5, 15, rps_siguiente_celda
     bltz $s6, rps_siguiente_celda
@@ -337,7 +362,7 @@ rps_dibujar_celda:
     jal  dibujar_pixel
 
 rps_siguiente_celda:
-    addi $s4, $s4, 1            # Incremento obligatorio del contador
+    addi $s4, $s4, 1
     j    rps_bucle
 
 rps_fin:
@@ -397,7 +422,6 @@ bps_calc_h:
     move $s6, $s1
 
 bps_restaurar_celda:
-    # CERO bucles infinitos: si cae fuera, avanzar al incremento de contador
     bltz $s5, bps_siguiente_celda
     bgt  $s5, 15, bps_siguiente_celda
     bltz $s6, bps_siguiente_celda
@@ -416,7 +440,7 @@ bps_restaurar_celda:
     jal  dibujar_pixel
 
 bps_siguiente_celda:
-    addi $s4, $s4, 1            # Incremento obligatorio del contador
+    addi $s4, $s4, 1
     j    bps_bucle
 
 bps_fin:
@@ -435,11 +459,9 @@ bps_fin:
 # ==============================================================================
 # SUBRUTINA: validar_posicion_barco
 # ------------------------------------------------------------------------------
-# Propósito: Evalúa si el barco en la posición (cursor_x, cursor_y) cabe en
-#            la zona de defensa (16..31) y no colisiona con otro barco.
-# Salida:
-#   $v0 = 1 si es válida, 0 si infringe límites o hay colisión.
-# Registros protegidos en stack: $s0-$s4 (20 bytes). Cero fugas de pila.
+# Propósito: Evalúa si el barco en (cursor_x, cursor_y) cabe en defensa (16..31)
+#            y no colisiona con otro barco ya colocado.
+# Salida: $v0 = 1 si es válida, 0 si infringe límites o hay colisión.
 # ==============================================================================
 validar_posicion_barco:
     subu $sp, $sp, 20
@@ -509,7 +531,7 @@ vpb_c_h:
 vpb_c_eval:
     sll  $t9, $t8, 4            # Y_local * 16
     add  $t9, $t9, $t7          # + X
-    add  $t9, $t5, $t9          # Dirección física en matriz lógica
+    add  $t9, $t5, $t9          # Dirección en matriz lógica
     lb   $t0, 0($t9)
     bnez $t0, vpb_invalido      # Si la celda != 0, hay colisión
 
@@ -626,4 +648,54 @@ renderizar_pantalla_completa:
 
     lw   $ra, 0($sp)
     addu $sp, $sp, 4
+    jr   $ra
+
+# ==============================================================================
+# EFECTOS DE SONIDO MEDIANTE SYSCALL 31 (MIDI Asíncrono - No Bloqueante)
+# ------------------------------------------------------------------------------
+# Registros:
+#   $a0 = Pitch (0..127)
+#   $a1 = Duración en milisegundos
+#   $a2 = Instrumento MIDI (0..127)
+#   $a3 = Volumen (0..127)
+# ==============================================================================
+
+# Sonido de Salpicadura de Agua / Fallo
+sonido_disparo_fallo:
+    li   $v0, 31
+    li   $a0, 40                 # Tono grave
+    li   $a1, 80                 # 80 ms
+    li   $a2, 122                # Instrumento: Seashore (Océano)
+    li   $a3, 75
+    syscall
+    jr   $ra
+
+# Sonido de Explosión / Impacto
+sonido_impacto:
+    li   $v0, 31
+    li   $a0, 72                 # Tono agudo de explosión
+    li   $a1, 140                # 140 ms
+    li   $a2, 127                # Instrumento: Gunshot
+    li   $a3, 115
+    syscall
+    jr   $ra
+
+# Sonido de Campana de Alarma / Hundimiento de Barco
+sonido_hundido:
+    li   $v0, 31
+    li   $a0, 58                 # Tono medio solemne
+    li   $a1, 350                # 350 ms
+    li   $a2, 14                 # Instrumento: Tubular Bells
+    li   $a3, 125
+    syscall
+    jr   $ra
+
+# Fanfarria Triunfal / Victoria
+sonido_victoria:
+    li   $v0, 31
+    li   $a0, 84                 # Tono agudo brillante
+    li   $a1, 600                # 600 ms
+    li   $a2, 11                 # Instrumento: Vibraphone
+    li   $a3, 127
+    syscall
     jr   $ra

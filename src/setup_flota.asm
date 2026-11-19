@@ -171,9 +171,8 @@ fb_evaluar_pvp:
     la   $a0, msg_transicion_pvp
     syscall
 
-    # Limpiar pantalla con azul océano para ocultar los barcos de J1
-    lw   $a0, COLOR_AGUA
-    jal  limpiar_pantalla_color
+    # Limpiar pantalla delimitando los dos tonos para ocultar los barcos de J1
+    jal  limpiar_pantalla_tableros
 
     # Configurar parámetros para Jugador 2
     li   $t5, 2

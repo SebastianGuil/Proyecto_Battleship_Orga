@@ -181,12 +181,35 @@ arrancar_setup:
     sw   $zero, puntaje_j2
     sw   $zero, fallos_turno
 
+    # Reinicializar vidas de barcos a valores reglamentarios (5, 4, 3, 2)
+    li   $t0, 5
+    sw   $t0, vidas_barcos_j1 + 4
+    sw   $t0, vidas_barcos_j2 + 4
+    li   $t0, 4
+    sw   $t0, vidas_barcos_j1 + 8
+    sw   $t0, vidas_barcos_j2 + 8
+    li   $t0, 3
+    sw   $t0, vidas_barcos_j1 + 12
+    sw   $t0, vidas_barcos_j2 + 12
+    li   $t0, 2
+    sw   $t0, vidas_barcos_j1 + 16
+    sw   $t0, vidas_barcos_j2 + 16
+
+    # Reinicializar vidas totales (5 + 4 + 3 + 2 = 14)
+    li   $t0, 14
+    sw   $t0, total_vidas_j1
+    sw   $t0, total_vidas_j2
+
+    # Reinicializar cola de la IA
+    sw   $zero, cola_ia_head
+    sw   $zero, cola_ia_tail
+    sw   $zero, cola_ia_count
+
     # 2. Limpiar matrices lógicas en memoria (.data)
     jal  limpiar_matrices_logicas
 
-    # 3. Limpiar pantalla completa con Azul Océano (VRAM)
-    lw   $a0, COLOR_AGUA
-    jal  limpiar_pantalla_color
+    # 3. Limpiar pantalla completa con delimitación de tonos (Ataque y Defensa)
+    jal  limpiar_pantalla_tableros
 
     # 4. Establecer posición inicial del cursor en Defensa (X=0, Y=16)
     li   $t0, 0
