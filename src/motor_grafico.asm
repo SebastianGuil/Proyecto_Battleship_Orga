@@ -8,13 +8,14 @@
 # Este módulo abstrae el acceso al Bitmap Display y garantiza que la VRAM refleje
 # fielmente el estado de las matrices lógicas en memoria (.data).
 #
-# CARACTERÍSTICAS CLAVE:
-# 1. Separación estricta Lógica / Gráficos: La VRAM es de sólo escritura.
-# 2. Cero corrupción visual del cursor: borrar_cursor restaura el píxel consultando
-#    la matriz lógica correspondiente (nunca pintando azul a ciegas).
-# 3. Soporte para Tablero de Ataque (ocultando barcos enemigos no impactados)
-#    y Tablero de Defensa (mostrando la flota propia y daños recibidos).
-# 4. Preview visual reactivo para la fase de colocación de barcos (Setup).
+# GARANTÍAS DE ROBUSTEZ:
+# 1. Registros protegidos en bucles: En renderizado y borrado de previews se usan
+#    exclusivamente registros $s0-$s7 (guardados/restaurados en $sp).
+# 2. Toda subrutina anidada preserva $ra en el stack ($sp).
+# 3. Cero bucles infinitos en bordes: Si una coordenada excede el rango de pantalla,
+#    el flujo salta directamente a la etiqueta de incremento del contador, nunca
+#    al inicio del bucle.
+# 4. dibujar_pixel descarta silenciosamente cualquier coordenada fuera de rango.
 # ==============================================================================
 
 .text
@@ -37,47 +38,30 @@
 # ------------------------------------------------------------------------------
 # Propósito: Escribe un color de 32 bits (0x00RRGGBB) en las coordenadas físicas
 #            (X, Y) de la VRAM mapeada.
-# Entradas estándar:
+# Entradas:
 #   $a0 = Coordenada X (Columna: 0 a 15)
 #   $a1 = Coordenada Y (Fila: 0 a 31)
 #   $a2 = Color hexadecimal (0x00RRGGBB)
-# Soporte de compatibilidad: Si $a0/$a1 están fuera de rango, evalúa $t0/$t1 o cursor.
-# Algoritmo de mapeo lineal:
-#   Offset = ((Y * 16) + X) * 4 bytes
-#   Dirección física = vram_buffer + Offset
+# Comportamiento: Si X o Y están fuera de rango, retorna inmediatamente (no-op).
 # ==============================================================================
 dibujar_pixel:
-    # 1. Validación de argumentos estándar en $a0 y $a1
-    bltz $a0, dp_check_t_regs
-    bgt  $a0, 15, dp_check_t_regs
-    bltz $a1, dp_check_t_regs
-    bgt  $a1, 31, dp_check_t_regs
-    move $t0, $a0
-    move $t1, $a1
-    j    dp_ejecutar
+    # 1. Validación estricta de límites de VRAM (16 cols x 32 filas)
+    bltz $a0, dp_retorno
+    bgt  $a0, 15, dp_retorno
+    bltz $a1, dp_retorno
+    bgt  $a1, 31, dp_retorno
 
-dp_check_t_regs:
-    # 2. Compatibilidad hacia atrás: evaluar $t0 y $t1 si los llamadores antiguos no cargaron $a0/$a1
-    bltz $t0, dp_check_cursor
-    bgt  $t0, 15, dp_check_cursor
-    bltz $t1, dp_check_cursor
-    bgt  $t1, 31, dp_check_cursor
-    j    dp_ejecutar
+    # 2. Desplazamiento lineal: ((Y * 16) + X) * 4 bytes
+    sll  $t0, $a1, 4             # $t0 = Y * 16
+    add  $t0, $t0, $a0           # $t0 = (Y * 16) + X
+    sll  $t0, $t0, 2             # $t0 = Offset en bytes (palabras de 4 bytes)
 
-dp_check_cursor:
-    # 3. Fallback de resguardo con la posición actual del cursor
-    lw   $t0, cursor_x
-    lw   $t1, cursor_y
+    # 3. Inyección en VRAM
+    la   $t1, vram_buffer        # Base de VRAM (0x10010000)
+    add  $t1, $t1, $t0           # Dirección física exacta
+    sw   $a2, 0($t1)
 
-dp_ejecutar:
-    # Cálculo del desplazamiento lineal: ((Y * 16) + X) * 4
-    sll  $t2, $t1, 4             # $t2 = Y * 16
-    add  $t2, $t2, $t0           # $t2 = (Y * 16) + X
-    sll  $t2, $t2, 2             # $t2 = Offset en bytes (palabras de 4 bytes)
-
-    la   $t3, vram_buffer        # Base de VRAM (0x10010000)
-    add  $t3, $t3, $t2           # Dirección física en VRAM
-    sw   $a2, 0($t3)             # Inyección del color en display
+dp_retorno:
     jr   $ra
 
 # ==============================================================================
@@ -136,12 +120,16 @@ limpiar_pantalla_color:
 #   $v0 = Código de color ARGB correspondiente
 # ==============================================================================
 obtener_color_celda:
+    # 0. Validación de límites: si está fuera de rango, retornar COLOR_AGUA
+    bltz $a0, occ_fuera_rango
+    bgt  $a0, 15, occ_fuera_rango
+    bltz $a1, occ_fuera_rango
+    bgt  $a1, 31, occ_fuera_rango
+
     bge  $a1, 16, occ_es_defensa
 
     # --------------------------------------------------------------------------
     # CASO A: TABLERO DE ATAQUE (Filas 0..15)
-    # Regla: Muestra el tablero del RIVAL, pero OCULTA barcos que no han sido
-    #        impactados (deben verse como agua azul para no hacer trampa).
     # --------------------------------------------------------------------------
 occ_es_ataque:
     lw   $t0, turno_actual
@@ -160,17 +148,15 @@ occ_atq_calc:
 
     beq  $t3, 6, occ_col_impacto # 6 = Impacto confirmado -> Rojo
     beq  $t3, 5, occ_col_fallo   # 5 = Disparo al agua -> Blanco
-    # Si es 0 (agua) o 1..4 (barco enemigo intacto), se muestra como agua azul
+    # Casillas 0 (agua) o 1..4 (barco enemigo intacto) se muestran como agua azul
     lw   $v0, COLOR_AGUA
     jr   $ra
 
     # --------------------------------------------------------------------------
     # CASO B: TABLERO DE DEFENSA (Filas 16..31)
-    # Regla: Muestra el tablero PROPIO con la posición de la flota (Gris),
-    #        los impactos recibidos (Rojo) y los disparos fallidos del rival (Blanco).
     # --------------------------------------------------------------------------
 occ_es_defensa:
-    subi $t4, $a1, 16           # Y local (0..15) dentro del tablero de defensa
+    subi $t4, $a1, 16           # Y local (0..15) dentro de defensa
     lw   $t0, turno_actual
 
     # En fase de Setup (estado_juego == 1), usamos jugador_setup
@@ -211,11 +197,15 @@ occ_col_agua:
     lw   $v0, COLOR_AGUA
     jr   $ra
 
+occ_fuera_rango:
+    lw   $v0, COLOR_AGUA
+    jr   $ra
+
 # ==============================================================================
 # SUBRUTINA: restaurar_celda_cursor (alias: borrar_cursor)
 # ------------------------------------------------------------------------------
 # Propósito: Redibuja la casilla donde está el cursor usando su color lógico real.
-#            Garantiza CERO corrupción visual (nunca pinta azul a ciegas).
+#            Garantiza CERO corrupción visual.
 # ==============================================================================
 borrar_cursor:
 restaurar_celda_cursor:
@@ -225,7 +215,7 @@ restaurar_celda_cursor:
     lw   $t0, estado_juego
     beq  $t0, 1, rcc_setup_mode
 
-    # Modo Normal (Batalla): Restaurar píxel individual
+    # Modo Batalla: Restaurar píxel individual
     lw   $a0, cursor_x
     lw   $a1, cursor_y
     jal  obtener_color_celda     # $v0 = Color real
@@ -274,13 +264,20 @@ dc_fin:
 # ==============================================================================
 # SUBRUTINA: renderizar_preview_setup
 # ------------------------------------------------------------------------------
-# Propósito: En fase de colocación, dibuja la proyección visual del barco
-#            según su tamaño y orientación antes de que el usuario lo confirme.
-#            - Verde (COLOR_PREVIEW_OK): Cabe y no hay colisiones.
-#            - Rojo (COLOR_PREVIEW_ERR): Excede bordes o colisiona con otro barco.
+# Propósito: Dibuja la silueta del barco en fase de colocación.
+#            Usa ÚNICAMENTE registros $s0-$s7 para proteger contadores y límites.
+# Registros usados:
+#   $s0 = cursor_x
+#   $s1 = cursor_y
+#   $s2 = tamaño del barco
+#   $s3 = orientación (0=H, 1=V)
+#   $s4 = contador de casilla
+#   $s5 = coordenada X de la celda
+#   $s6 = coordenada Y de la celda
+#   $s7 = color de preview (Verde OK / Rojo ERR)
 # ==============================================================================
 renderizar_preview_setup:
-    subu $sp, $sp, 28
+    subu $sp, $sp, 36
     sw   $ra, 0($sp)
     sw   $s0, 4($sp)
     sw   $s1, 8($sp)
@@ -288,45 +285,59 @@ renderizar_preview_setup:
     sw   $s3, 16($sp)
     sw   $s4, 20($sp)
     sw   $s5, 24($sp)
+    sw   $s6, 28($sp)
+    sw   $s7, 32($sp)
 
     lw   $s0, cursor_x
     lw   $s1, cursor_y
+
     lw   $t0, barco_actual
     sll  $t1, $t0, 2
     la   $t2, flota_tamanos
     add  $t2, $t2, $t1
-    lw   $s2, 0($t2)            # Longitud del barco
-    lw   $s3, orientacion       # 0 = Horizontal, 1 = Vertical
+    lw   $s2, 0($t2)             # Longitud del barco (5, 4, 3, 2)
+    lw   $s3, orientacion        # 0 = Horizontal, 1 = Vertical
 
+    # 1. Validar posición (límites y colisión)
     jal  validar_posicion_barco  # Retorna $v0 = 1 (Válido), 0 (Inválido)
     beqz $v0, rps_es_invalido
-    lw   $s4, COLOR_PREVIEW_OK
+    lw   $s7, COLOR_PREVIEW_OK   # Verde
     j    rps_comenzar_pintado
 
 rps_es_invalido:
-    lw   $s4, COLOR_PREVIEW_ERR
+    lw   $s7, COLOR_PREVIEW_ERR  # Rojo
 
 rps_comenzar_pintado:
-    li   $s5, 0
+    li   $s4, 0                  # Contador de celdas pintadas
 
 rps_bucle:
-    beq  $s5, $s2, rps_fin
+    beq  $s4, $s2, rps_fin
 
     beq  $s3, 0, rps_calc_h
     # Vertical:
-    move $a0, $s0
-    add  $a1, $s1, $s5
-    j    rps_pintar
+    move $s5, $s0
+    add  $s6, $s1, $s4
+    j    rps_dibujar_celda
 
 rps_calc_h:
     # Horizontal:
-    add  $a0, $s0, $s5
-    move $a1, $s1
+    add  $s5, $s0, $s4
+    move $s6, $s1
 
-rps_pintar:
-    move $a2, $s4
+rps_dibujar_celda:
+    # CERO bucles infinitos: si cae fuera de límites, salta al incremento de contador
+    bltz $s5, rps_siguiente_celda
+    bgt  $s5, 15, rps_siguiente_celda
+    bltz $s6, rps_siguiente_celda
+    bgt  $s6, 31, rps_siguiente_celda
+
+    move $a0, $s5
+    move $a1, $s6
+    move $a2, $s7
     jal  dibujar_pixel
-    addi $s5, $s5, 1
+
+rps_siguiente_celda:
+    addi $s4, $s4, 1            # Incremento obligatorio del contador
     j    rps_bucle
 
 rps_fin:
@@ -337,62 +348,75 @@ rps_fin:
     lw   $s3, 16($sp)
     lw   $s4, 20($sp)
     lw   $s5, 24($sp)
-    addu $sp, $sp, 28
+    lw   $s6, 28($sp)
+    lw   $s7, 32($sp)
+    addu $sp, $sp, 36
     jr   $ra
 
 # ==============================================================================
 # SUBRUTINA: borrar_preview_setup
 # ------------------------------------------------------------------------------
-# Propósito: Restaura a sus colores originales todas las casillas que fueron
-#            cubiertas por el preview visual al mover o rotar el barco.
+# Propósito: Restaura a sus colores originales todas las casillas del preview.
+#            Usa ÚNICAMENTE registros $s0-$s7 para garantizar estabilidad total.
 # ==============================================================================
 borrar_preview_setup:
-    subu $sp, $sp, 24
+    subu $sp, $sp, 36
     sw   $ra, 0($sp)
     sw   $s0, 4($sp)
     sw   $s1, 8($sp)
     sw   $s2, 12($sp)
     sw   $s3, 16($sp)
     sw   $s4, 20($sp)
+    sw   $s5, 24($sp)
+    sw   $s6, 28($sp)
+    sw   $s7, 32($sp)
 
     lw   $s0, cursor_x
     lw   $s1, cursor_y
+
     lw   $t0, barco_actual
     sll  $t1, $t0, 2
     la   $t2, flota_tamanos
     add  $t2, $t2, $t1
-    lw   $s2, 0($t2)            # Longitud
-    lw   $s3, orientacion       # 0 = H, 1 = V
-    li   $s4, 0                 # Contador
+    lw   $s2, 0($t2)             # Longitud
+    lw   $s3, orientacion        # 0 = H, 1 = V
+    li   $s4, 0                  # Contador
 
 bps_bucle:
     beq  $s4, $s2, bps_fin
 
     beq  $s3, 0, bps_calc_h
-    move $a0, $s0
-    add  $a1, $s1, $s4
-    j    bps_restaurar
+    # Vertical:
+    move $s5, $s0
+    add  $s6, $s1, $s4
+    j    bps_restaurar_celda
 
 bps_calc_h:
-    add  $a0, $s0, $s4
-    move $a1, $s1
+    # Horizontal:
+    add  $s5, $s0, $s4
+    move $s6, $s1
 
-bps_restaurar:
+bps_restaurar_celda:
+    # CERO bucles infinitos: si cae fuera, avanzar al incremento de contador
+    bltz $s5, bps_siguiente_celda
+    bgt  $s5, 15, bps_siguiente_celda
+    bltz $s6, bps_siguiente_celda
+    bgt  $s6, 31, bps_siguiente_celda
+
+    # 1. Obtener color lógico real
+    move $a0, $s5
+    move $a1, $s6
     jal  obtener_color_celda    # Retorna $v0
-    move $a2, $v0
+    move $s7, $v0
 
-    beq  $s3, 0, bps_recalc_h
-    move $a0, $s0
-    add  $a1, $s1, $s4
-    j    bps_do_dibujar
-
-bps_recalc_h:
-    add  $a0, $s0, $s4
-    move $a1, $s1
-
-bps_do_dibujar:
+    # 2. Restaurar píxel en VRAM
+    move $a0, $s5
+    move $a1, $s6
+    move $a2, $s7
     jal  dibujar_pixel
-    addi $s4, $s4, 1
+
+bps_siguiente_celda:
+    addi $s4, $s4, 1            # Incremento obligatorio del contador
     j    bps_bucle
 
 bps_fin:
@@ -402,91 +426,110 @@ bps_fin:
     lw   $s2, 12($sp)
     lw   $s3, 16($sp)
     lw   $s4, 20($sp)
-    addu $sp, $sp, 24
+    lw   $s5, 24($sp)
+    lw   $s6, 28($sp)
+    lw   $s7, 32($sp)
+    addu $sp, $sp, 36
     jr   $ra
 
 # ==============================================================================
 # SUBRUTINA: validar_posicion_barco
 # ------------------------------------------------------------------------------
-# Propósito: Verifica si la posición actual (cursor_x, cursor_y) con el barco
-#            actual y su orientación cabe dentro del tablero de defensa y no
-#            colisiona con barcos previamente fijados.
+# Propósito: Evalúa si el barco en la posición (cursor_x, cursor_y) cabe en
+#            la zona de defensa (16..31) y no colisiona con otro barco.
 # Salida:
-#   $v0 = 1 si es completamente válida, 0 si hay infracción.
+#   $v0 = 1 si es válida, 0 si infringe límites o hay colisión.
+# Registros protegidos en stack: $s0-$s4 (20 bytes). Cero fugas de pila.
 # ==============================================================================
 validar_posicion_barco:
-    lw   $t0, cursor_x
-    lw   $t1, cursor_y          # Rango esperado de defensa: 16..31
-    lw   $t2, barco_actual
-    sll  $t3, $t2, 2
-    la   $t4, flota_tamanos
-    add  $t4, $t4, $t3
-    lw   $t5, 0($t4)            # Tamaño del barco
-    lw   $t6, orientacion       # 0 = H, 1 = V
+    subu $sp, $sp, 20
+    sw   $s0, 0($sp)
+    sw   $s1, 4($sp)
+    sw   $s2, 8($sp)
+    sw   $s3, 12($sp)
+    sw   $s4, 16($sp)
 
-    # Validar que el inicio esté dentro de la zona de defensa
-    bltz $t0, vpb_invalido
-    bgt  $t0, 15, vpb_invalido
-    blt  $t1, 16, vpb_invalido
-    bgt  $t1, 31, vpb_invalido
+    lw   $s0, cursor_x
+    lw   $s1, cursor_y
 
-    # Validar bordes según orientación
-    beq  $t6, 0, vpb_val_h
+    lw   $t0, barco_actual
+    sll  $t1, $t0, 2
+    la   $t2, flota_tamanos
+    add  $t2, $t2, $t1
+    lw   $s2, 0($t2)             # Longitud del barco
+    lw   $s3, orientacion        # 0 = H, 1 = V
 
-    # Vertical: Y + tamaño <= 32
-    add  $t7, $t1, $t5
-    bgt  $t7, 32, vpb_invalido
+    # 1. Validar que el inicio esté dentro de defensa (X: 0..15, Y: 16..31)
+    bltz $s0, vpb_invalido
+    bgt  $s0, 15, vpb_invalido
+    blt  $s1, 16, vpb_invalido
+    bgt  $s1, 31, vpb_invalido
+
+    # 2. Validar bordes según orientación
+    beq  $s3, 0, vpb_val_h
+
+    # Vertical: Y + longitud <= 32
+    add  $t3, $s1, $s2
+    bgt  $t3, 32, vpb_invalido
     j    vpb_val_colision
 
 vpb_val_h:
-    # Horizontal: X + tamaño <= 16
-    add  $t7, $t0, $t5
-    bgt  $t7, 16, vpb_invalido
+    # Horizontal: X + longitud <= 16
+    add  $t3, $s0, $s2
+    bgt  $t3, 16, vpb_invalido
 
 vpb_val_colision:
-    # Validar colisión en la matriz lógica correspondiente
-    lw   $t8, jugador_setup
-    beq  $t8, 1, vpb_tab_j1
-    la   $t9, tablero_j2
-    j    vpb_col_bucle_init
+    # 3. Validar colisión en la matriz lógica correspondiente
+    lw   $t4, jugador_setup
+    beq  $t4, 1, vpb_tab_j1
+    la   $t5, tablero_j2
+    j    vpb_col_init
 
 vpb_tab_j1:
-    la   $t9, tablero_j1
+    la   $t5, tablero_j1
 
-vpb_col_bucle_init:
-    subi $t1, $t1, 16           # Y local (0..15)
-    li   $t7, 0                 # Contador
+vpb_col_init:
+    subi $t6, $s1, 16           # Y_local (0..15)
+    li   $s4, 0                 # Contador
 
 vpb_col_bucle:
-    beq  $t7, $t5, vpb_valido
+    beq  $s4, $s2, vpb_valido
 
-    beq  $t6, 0, vpb_c_h
+    beq  $s3, 0, vpb_c_h
     # Vertical:
-    move $a0, $t0
-    add  $a1, $t1, $t7
-    j    vpb_c_check
+    move $t7, $s0               # X
+    add  $t8, $t6, $s4          # Y_local
+    j    vpb_c_eval
 
 vpb_c_h:
     # Horizontal:
-    add  $a0, $t0, $t7
-    move $a1, $t1
+    add  $t7, $s0, $s4          # X
+    move $t8, $t6               # Y_local
 
-vpb_c_check:
-    sll  $t4, $a1, 4            # Y_local * 16
-    add  $t4, $t4, $a0          # + X_local
-    add  $t4, $t9, $t4
-    lb   $t3, 0($t4)
-    bnez $t3, vpb_invalido       # Si no es 0, celda ocupada
+vpb_c_eval:
+    sll  $t9, $t8, 4            # Y_local * 16
+    add  $t9, $t9, $t7          # + X
+    add  $t9, $t5, $t9          # Dirección física en matriz lógica
+    lb   $t0, 0($t9)
+    bnez $t0, vpb_invalido      # Si la celda != 0, hay colisión
 
-    addi $t7, $t7, 1
+    addi $s4, $s4, 1
     j    vpb_col_bucle
 
 vpb_valido:
     li   $v0, 1
-    jr   $ra
+    j    vpb_fin
 
 vpb_invalido:
     li   $v0, 0
+
+vpb_fin:
+    lw   $s0, 0($sp)
+    lw   $s1, 4($sp)
+    lw   $s2, 8($sp)
+    lw   $s3, 12($sp)
+    lw   $s4, 16($sp)
+    addu $sp, $sp, 20
     jr   $ra
 
 # ==============================================================================

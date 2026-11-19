@@ -69,8 +69,9 @@ mostrar_menu_consola:
 #            - Línea divisoria central con acento visual.
 # ==============================================================================
 mostrar_menu_visual:
-    subu $sp, $sp, 4
+    subu $sp, $sp, 8
     sw   $ra, 0($sp)
+    sw   $s0, 4($sp)
 
     # 1. Zona Superior (Ataque / Opción 1 - PvP): 256 píxeles
     la   $a0, vram_buffer
@@ -85,20 +86,22 @@ mostrar_menu_visual:
     lw   $a2, COLOR_MENU_PVCPU
     jal  fill_rect
 
-    # 3. Línea Divisoria decorativa (Fila 15 y 16, píxeles de acento)
-    li   $t0, 0                 # Columna X = 0..15
+    # 3. Línea Divisoria decorativa (Fila 15, columnas 0..15 con COLOR_LINEA_DIV)
+    # Se utiliza $s0 como contador protegido para que dibujar_pixel no lo corrompa
+    li   $s0, 0                 # Columna X = 0..15
 mmv_linea:
-    bgt  $t0, 15, mmv_fin_linea
-    move $a0, $t0
+    bgt  $s0, 15, mmv_fin_linea
+    move $a0, $s0
     li   $a1, 15
     lw   $a2, COLOR_LINEA_DIV
     jal  dibujar_pixel
-    addi $t0, $t0, 1
+    addi $s0, $s0, 1
     j    mmv_linea
 
 mmv_fin_linea:
     lw   $ra, 0($sp)
-    addu $sp, $sp, 4
+    lw   $s0, 4($sp)
+    addu $sp, $sp, 8
     jr   $ra
 
 # ==============================================================================

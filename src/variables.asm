@@ -159,6 +159,17 @@ total_vidas_j2:     .word 14
     .globl msg_setup_j1
     .globl msg_setup_j2
     .globl msg_prompt_tecla
+    .globl msg_error_posicion
+    .globl msg_barco_ok_prefix
+    .globl msg_colocando_prefix
+    .globl msg_cpu_setup
+    .globl msg_cpu_setup_ok
+    .globl msg_batalla_inicio
+    .globl msg_turno_j1
+    .globl msg_turno_j2
+    .globl msg_transicion_pvp
+    .globl msg_rotacion_h
+    .globl msg_rotacion_v
     .globl str_barco_1
     .globl str_barco_2
     .globl str_barco_3
@@ -193,6 +204,39 @@ msg_setup_j1:
 
 msg_setup_j2:
     .asciiz "\n========================================================\n           FASE DE COLOCACION: JUGADOR 2                \n========================================================\nUbica tus 4 barcos en el TABLERO DE DEFENSA (filas 16-31).\nControles:\n  [W/A/S/D] Mover cursor\n  [R]       Rotar barco (Horizontal / Vertical)\n  [ENTER/E] Confirmar colocacion del barco\n--------------------------------------------------------\n"
+
+msg_error_posicion:
+    .asciiz "[ERROR] Posicion invalida o colision con otro barco. Elige otra.\n"
+
+msg_barco_ok_prefix:
+    .asciiz "[OK] Barco fijado con exito: "
+
+msg_colocando_prefix:
+    .asciiz "Colocando barco: "
+
+msg_cpu_setup:
+    .asciiz "\n[CPU] Desplegando flota enemiga de forma tactica y aleatoria...\n"
+
+msg_cpu_setup_ok:
+    .asciiz "[CPU] ¡Flota enemiga desplegada con exito!\n"
+
+msg_batalla_inicio:
+    .asciiz "\n========================================================\n           ¡COMIENZA LA BATALLA NAVAL!                  \n========================================================\nTablero Superior (0-15) : Zona de Ataque (Disparos)\nTablero Inferior (16-31): Zona de Defensa (Tu Flota)\nControles:\n  [W/A/S/D] Apuntar coordenada\n  [ENTER/E] Disparar misil\n========================================================\n"
+
+msg_turno_j1:
+    .asciiz "\n>>> TURNO DE ATAQUE: JUGADOR 1 <<<\n"
+
+msg_turno_j2:
+    .asciiz "\n>>> TURNO DE ATAQUE: JUGADOR 2 <<<\n"
+
+msg_transicion_pvp:
+    .asciiz "\n--------------------------------------------------------\nJugador 1 ha terminado de colocar su flota.\nPasa el turno a Jugador 2. Pantalla despejada.\n--------------------------------------------------------\n"
+
+msg_rotacion_h:
+    .asciiz "Orientacion: [HORIZONTAL]\n"
+
+msg_rotacion_v:
+    .asciiz "Orientacion: [VERTICAL]\n"
 
 
 # ==============================================================================
